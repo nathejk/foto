@@ -18,6 +18,8 @@ export class UploadComponent implements OnInit {
   message: string = '';
   teamNumber: string = '';
 
+  uploadError: boolean = false;
+
   imageUrl: string | null = null;
 
   @Output() public onUploadFinished = new EventEmitter();
@@ -45,12 +47,20 @@ export class UploadComponent implements OnInit {
           if (event.type === HttpEventType.UploadProgress)
             this.progress = Math.round((100 * event.loaded) / event.total!);
           else if (event.type === HttpEventType.Response) {
-            this.message = 'Upload success.';
+            this.message = 'Upload færdig';
             this.onUploadFinished.emit(event.body);
             this.imageUrl = event.body.imageUrl;
+            this.uploadError = false;
+            this.teamNumber = "";
+            files = undefined;
           }
         },
-        error: (err: HttpErrorResponse) => console.log(err),
+        error: (err: HttpErrorResponse) => {
+          console.error(err);
+          this.progress = 0;
+          this.message = 'Fejl i upload';
+          this.uploadError = true;
+        }
       });
   };
 }

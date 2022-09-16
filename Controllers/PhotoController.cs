@@ -10,10 +10,12 @@ namespace FotoApp.Controllers
     public class PhotoController : ControllerBase
     {
         private readonly IConfiguration _configuration;
+        private readonly IHttpContextAccessor _accessor;
 
-        public PhotoController(IConfiguration configuration)
+        public PhotoController(IConfiguration configuration, IHttpContextAccessor accessor)
         {
             _configuration = configuration;
+            _accessor = accessor;
         }
 
         [HttpPost]
@@ -21,6 +23,7 @@ namespace FotoApp.Controllers
         {
             try
             {
+                
                 var file = Request.Form.Files[0];
                 var pathToSave = _configuration["PhotoPath"];
                 if (file.Length > 0)
@@ -33,9 +36,12 @@ namespace FotoApp.Controllers
                     {
                         file.CopyTo(stream);
                     }
+                    
+                    var hostUrl = new Uri($"{_accessor.HttpContext.Request.Scheme}://{_accessor.HttpContext.Request.Host}/photos/{fileName}");
+                    
                     return new OkObjectResult(new
                     {
-                        ImageUrl = $"/photos/{fileName}"
+                        ImageUrl = hostUrl
                     });
                 }
                 else
