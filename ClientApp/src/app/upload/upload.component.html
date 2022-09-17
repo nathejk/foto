@@ -1,7 +1,4 @@
 <div class="row" style="margin-bottom:15px;">
-  <div *ngIf="imageUrl" class="col-md-12">
-    <img [src]="imageUrl" alt="Foto" style="max-width: 100%; max-height: 80%; display: block; margin: auto; padding-top: 20px;"/>
-  </div>
   <div class="col-md-12" style="padding-top: 30px;">
     <div class="row">
       <div class="col-md-8">
@@ -10,7 +7,8 @@
                accept="image/*;capture=camera">
       </div>
       <div class="col-md-4">
-        <button type="button" class="form-control btn btn-success" (click)="file.click()" [disabled]="!teamNumber">Upload Billede
+        <button type="button" class="form-control btn btn-success" (click)="file.click()" [disabled]="!teamNumber">Tag
+          Billede
         </button>
       </div>
     </div>
@@ -28,5 +26,9 @@
     <span class="uploadError" *ngIf="message && uploadError">
             {{message}}
         </span>
+  </div>
+  <div *ngIf="imageUrl" class="col-md-12">
+    <img [src]="imageUrl" alt="Foto"
+         style="max-width: 100%; max-height: 80%; display: block; margin: auto; padding-top: 20px;"/>
   </div>
 </div>

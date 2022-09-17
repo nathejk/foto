@@ -30,6 +30,10 @@ export class UploadComponent implements OnInit {
     if (files.length === 0) {
       return;
     }
+    this.message = '';
+    this.progress = 0;
+    this.uploadError = false;
+
     let fileToUpload = <File>files[0];
     const formData = new FormData();
     formData.append('file', fileToUpload, fileToUpload.name);
@@ -50,7 +54,6 @@ export class UploadComponent implements OnInit {
             this.message = 'Upload færdig';
             this.onUploadFinished.emit(event.body);
             this.imageUrl = event.body.imageUrl;
-            this.uploadError = false;
             this.teamNumber = "";
             files = undefined;
           }

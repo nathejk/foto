@@ -15,7 +15,7 @@ code {
   border-color: #1861ac;
 }
 
-html {
+html, body {
   background-color: #181a1b;
   color: #d1cdc7;
 }
