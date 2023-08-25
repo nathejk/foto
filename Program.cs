@@ -1,12 +1,19 @@
 using Microsoft.Extensions.FileProviders;
+using Serilog;
+
+Log.Logger = new LoggerConfiguration().WriteTo.Console().CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Host.UseSerilog();
+
+Directory.CreateDirectory(builder.Configuration["PhotoPath"]!);
 
 // Add services to the container.
 
 builder.Services.AddControllersWithViews();
 builder.Services.AddHttpContextAccessor();
-
+builder.Services.AddLogging();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -23,7 +30,6 @@ app.UseRouting();
 app.MapControllerRoute(name: "default", pattern: "{controller}/{action=Index}/{id?}");
 
 app.MapFallbackToFile("index.html");
-;
 
 app.UseCors(c =>
 {
