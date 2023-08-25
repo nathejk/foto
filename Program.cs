@@ -20,11 +20,10 @@ app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.UseRouting();
 
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller}/{action=Index}/{id?}");
+app.MapControllerRoute(name: "default", pattern: "{controller}/{action=Index}/{id?}");
 
-app.MapFallbackToFile("index.html"); ;
+app.MapFallbackToFile("index.html");
+;
 
 app.UseCors(c =>
 {
@@ -33,10 +32,12 @@ app.UseCors(c =>
     c.AllowAnyMethod();
 });
 
-app.UseStaticFiles(new StaticFileOptions()
-{
-    FileProvider = new PhysicalFileProvider(builder.Configuration["PhotoPath"]),
-    RequestPath = new PathString("/photos")
-});
+app.UseStaticFiles(
+    new StaticFileOptions()
+    {
+        FileProvider = new PhysicalFileProvider(builder.Configuration["PhotoPath"]!),
+        RequestPath = new PathString("/photos")
+    }
+);
 
 app.Run();
