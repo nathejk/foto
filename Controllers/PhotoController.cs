@@ -108,15 +108,30 @@ public class PhotoController : ControllerBase
         }
     }
 
-    [HttpGet("list")]
-    public IActionResult List()
+    [HttpGet("list/{type}")]
+    public IActionResult List([FromRoute] string type)
     {
         var hostUrl = new Uri(
             $"{_accessor.HttpContext?.Request.Scheme}://{_accessor.HttpContext?.Request.Host}"
         );
-        var localFiles = Directory.GetFiles(_configuration["PhotoPath"] + "/fb");
-        var files = localFiles.Select(x => $"{hostUrl}photos/fb/{Path.GetFileName(x)}");
-
-        return Ok(files);
+        try
+        {
+            var localFiles = Directory.GetFiles($"{_configuration["PhotoPath"]}/{type}/fb");
+            var files = localFiles.Select(x => $"{hostUrl}photos/{type}/fb/{Path.GetFileName(x)}");
+            return Ok(files);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            _logger.LogWarning(
+                "Client tried to download files from non-existing type \"{Type}\"!",
+                type
+            );
+            return NotFound();
+        }
+        catch (Exception e)
+        {
+            _logger.LogError("Failed getting photos");
+            return BadRequest(e);
+        }
     }
 }
