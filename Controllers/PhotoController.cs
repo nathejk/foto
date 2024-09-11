@@ -26,7 +26,8 @@ public class PhotoController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Upload(
         [FromQuery] string teamNumber,
-        [FromQuery] string type = "start"
+        [FromQuery] string type = "start",
+        [FromQuery] bool attention = false
     )
     {
         var basedir = _configuration.GetValue<string>("PhotoPath");
@@ -54,10 +55,12 @@ public class PhotoController : ControllerBase
             var prefixCounter = 0;
             string fileName;
 
+            var prefix = attention ? "XXX_" : "";
+            
             do
             {
                 prefixCounter++;
-                fileName = $"Team-{teamNumber}_{prefixCounter}{extension}";
+                fileName = $"{prefix}Team-{teamNumber}_{prefixCounter}{extension}";
                 _logger.LogDebug("Incrementing prefixCounter to {Count}", prefixCounter);
             } while (System.IO.File.Exists($"{basedir}/{fileName}"));
 

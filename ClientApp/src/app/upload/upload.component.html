@@ -1,7 +1,10 @@
 <div class="row" style="margin-bottom:15px;">
   <div class="col-md-12" style="padding-top: 30px;">
     <div class="row">
-      <div class="col-md-8">
+      <div class="col-md-2">
+        <button (click)="attention = !attention" type="button" class="form-control btn" [ngClass]="attention ? 'btn-danger' : 'btn-success'">Attention</button>
+      </div>
+      <div class="col-md-6">
         <input [(ngModel)]="teamNumber" type="text" placeholder="Holdnummer" class="form-control">
         <input type="file" #file placeholder="Choose file" (change)="uploadFile(file.files)" style="display:none;"
                accept="image/*;capture=camera">

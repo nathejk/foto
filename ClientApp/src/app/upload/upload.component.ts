@@ -17,6 +17,7 @@ export class UploadComponent implements OnInit {
   progress: number = 0;
   message: string = '';
   teamNumber: string = '';
+  attention: boolean = false;
 
   uploadError: boolean = false;
 
@@ -39,7 +40,7 @@ export class UploadComponent implements OnInit {
     formData.append('file', fileToUpload, fileToUpload.name);
 
     this.http
-      .post(`${environment.apiUrl}/photo?teamNumber=${this.teamNumber}`,
+      .post(`${environment.apiUrl}/photo?teamNumber=${this.teamNumber}&attention=${this.attention}`,
         formData,
         {
           reportProgress: true,
@@ -55,6 +56,7 @@ export class UploadComponent implements OnInit {
             this.onUploadFinished.emit(event.body);
             this.imageUrl = event.body.imageUrl;
             this.teamNumber = "";
+            this.attention = false;
             files = undefined;
           }
         },
