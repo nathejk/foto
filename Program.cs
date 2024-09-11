@@ -14,6 +14,14 @@ Directory.CreateDirectory(builder.Configuration["PhotoPath"]!);
 builder.Services.AddControllersWithViews();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddLogging();
+
+builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
+{
+    p.AllowAnyOrigin();
+    p.AllowAnyMethod();
+    p.AllowAnyHeader();
+}));
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -27,16 +35,11 @@ app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.UseRouting();
 
+app.UseCors();
+
 app.MapControllerRoute(name: "default", pattern: "{controller}/{action=Index}/{id?}");
 
 app.MapFallbackToFile("index.html");
-
-app.UseCors(c =>
-{
-    c.AllowAnyHeader();
-    c.AllowAnyOrigin();
-    c.AllowAnyMethod();
-});
 
 app.UseStaticFiles(
     new StaticFileOptions()
