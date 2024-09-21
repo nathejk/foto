@@ -1,15 +1,24 @@
 <div class="row" style="margin-bottom:15px;">
   <div class="col-md-12" style="padding-top: 30px;">
     <div class="row">
-      <div class="col-md-2">
-        <button (click)="attention = !attention" type="button" class="form-control btn" [ngClass]="attention ? 'btn-danger' : 'btn-success'">Attention</button>
+      <div class="col-md-3">
+        <button (click)="attention = !attention" type="button" class="form-control btn"
+                [ngClass]="attention ? 'btn-danger' : 'btn-success'">Attention
+        </button>
       </div>
-      <div class="col-md-6">
+      <div class="col-md-4">
         <input [(ngModel)]="teamNumber" type="text" placeholder="Holdnummer" class="form-control">
         <input type="file" #file placeholder="Choose file" (change)="uploadFile(file.files)" style="display:none;"
                accept="image/*;capture=camera">
       </div>
-      <div class="col-md-4">
+      <div class="col-md-2">
+        <select class="form-control" name="type" [(ngModel)]="imageType">
+          <option value="start">Start</option>
+          <option value="bandit">Bandit</option>
+          <option value="maal">Mål</option>
+        </select>
+      </div>
+      <div class="col-md-3">
         <button type="button" class="form-control btn btn-success" (click)="file.click()" [disabled]="!teamNumber">Tag
           Billede
         </button>
@@ -21,13 +30,13 @@
   </div>
   <div class="col-md-4">
         <span class="upload" *ngIf="progress > 0">
-            {{progress}}%
+            {{ progress }}%
         </span>
     <span class="upload" *ngIf="message && !uploadError">
-            {{message}}
+            {{ message }}
         </span>
     <span class="uploadError" *ngIf="message && uploadError">
-            {{message}}
+            {{ message }}
         </span>
   </div>
   <div *ngIf="imageUrl" class="col-md-12">
