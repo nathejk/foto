@@ -6,7 +6,7 @@ EXPOSE 80
 EXPOSE 443
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-RUN curl -fsSL https://deb.nodesource.com/setup_16.x | bash - && apt-get update && apt-get install -y nodejs build-essential && apt-get clean
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get update && apt-get install -y nodejs build-essential && apt-get clean
 WORKDIR /src
 COPY ["FotoApp.csproj", "."]
 RUN dotnet restore "./FotoApp.csproj"
