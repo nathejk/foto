@@ -36,7 +36,7 @@ public class PhotoController : ControllerBase
             throw new Exception("PhotoPath cannot be null!");
         }
 
-        basedir = $"{basedir.TrimEnd('/')}/{type}";
+        basedir = $"{basedir.TrimEnd('/')}/{DateTime.UtcNow:yyyy}/{type}";
 
         try
         {
@@ -81,7 +81,7 @@ public class PhotoController : ControllerBase
                 image.Metadata.IptcProfile.SetValue(IptcTag.Caption, $"Hold {teamNumber}");
                 image.Metadata.IptcProfile.SetValue(
                     IptcTag.CopyrightNotice,
-                    $"Nathejk {DateTime.Now.Year}"
+                    $"Nathejk {DateTime.UtcNow:yyyy}"
                 );
 
                 await image.SaveAsync(fullPath);
@@ -99,7 +99,7 @@ public class PhotoController : ControllerBase
             }
 
             var hostUrl = new Uri(
-                $"{_accessor.HttpContext?.Request.Scheme}://{_accessor.HttpContext?.Request.Host}/photos/{type}/{fileName}"
+                $"{_accessor.HttpContext?.Request.Scheme}://{_accessor.HttpContext?.Request.Host}/photos/{DateTime.UtcNow:yyyy}/{type}/{fileName}"
             );
 
             return new OkObjectResult(new { ImageUrl = hostUrl });
@@ -119,8 +119,8 @@ public class PhotoController : ControllerBase
         );
         try
         {
-            var localFiles = Directory.GetFiles($"{_configuration["PhotoPath"]}/{type}/fb");
-            var files = localFiles.Select(x => $"{hostUrl}photos/{type}/fb/{Path.GetFileName(x)}");
+            var localFiles = Directory.GetFiles($"{_configuration["PhotoPath"]}/{DateTime.UtcNow:yyyy}/{type}/fb");
+            var files = localFiles.Select(x => $"{hostUrl}photos/{DateTime.UtcNow:yyyy}/{type}/fb/{Path.GetFileName(x)}");
             return Ok(files);
         }
         catch (DirectoryNotFoundException)
@@ -133,7 +133,7 @@ public class PhotoController : ControllerBase
         }
         catch (Exception e)
         {
-            _logger.LogError("Failed getting photos");
+            _logger.LogError(e, "Failed getting photos");
             return BadRequest(e);
         }
     }
