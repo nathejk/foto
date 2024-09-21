@@ -1,28 +1,19 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Headers;
+using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Metadata.Profiles.Iptc;
+using SixLabors.ImageSharp.Processing;
 
 namespace FotoApp.Controllers;
 
 [Route("api/[controller]")]
 [ApiController]
-public class PhotoController : ControllerBase
+public class PhotoController(
+    IConfiguration configuration,
+    IHttpContextAccessor accessor,
+    ILogger<PhotoController> logger)
+    : ControllerBase            
 {
-    private readonly IConfiguration _configuration;
-    private readonly IHttpContextAccessor _accessor;
-    private readonly ILogger<PhotoController> _logger;
-
-    public PhotoController(
-        IConfiguration configuration,
-        IHttpContextAccessor accessor,
-        ILogger<PhotoController> logger
-    )
-    {
-        _configuration = configuration;
-        _accessor = accessor;
-        _logger = logger;
-    }
-
     [HttpPost]
     public async Task<IActionResult> Upload(
         [FromQuery] string teamNumber,
@@ -30,7 +21,7 @@ public class PhotoController : ControllerBase
         [FromQuery] bool attention = false
     )
     {
-        var basedir = _configuration.GetValue<string>("PhotoPath");
+        var basedir = configuration.GetValue<string>("PhotoPath");
         if (basedir is null)
         {
             throw new Exception("PhotoPath cannot be null!");
@@ -61,7 +52,7 @@ public class PhotoController : ControllerBase
             {
                 prefixCounter++;
                 fileName = $"{prefix}Team-{teamNumber}_{prefixCounter}{extension}";
-                _logger.LogDebug("Incrementing prefixCounter to {Count}", prefixCounter);
+                logger.LogDebug("Incrementing prefixCounter to {Count}", prefixCounter);
             } while (System.IO.File.Exists($"{basedir}/{fileName}"));
 
             var fullPath = Path.Combine(basedir, fileName);
@@ -95,18 +86,18 @@ public class PhotoController : ControllerBase
             }
             catch (Exception e)
             {
-                _logger.LogError(e, "Failed resizing image");
+                logger.LogError(e, "Failed resizing image");
             }
 
             var hostUrl = new Uri(
-                $"{_accessor.HttpContext?.Request.Scheme}://{_accessor.HttpContext?.Request.Host}/photos/{DateTime.UtcNow:yyyy}/{type}/{fileName}"
+                $"{accessor.HttpContext?.Request.Scheme}://{accessor.HttpContext?.Request.Host}/photos/{DateTime.UtcNow:yyyy}/{type}/{fileName}"
             );
 
             return new OkObjectResult(new { ImageUrl = hostUrl });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed saving image!");
+            logger.LogError(ex, "Failed saving image!");
             return StatusCode(500, $"Internal server error: {ex}");
         }
     }
@@ -115,17 +106,17 @@ public class PhotoController : ControllerBase
     public IActionResult List([FromRoute] string type)
     {
         var hostUrl = new Uri(
-            $"{_accessor.HttpContext?.Request.Scheme}://{_accessor.HttpContext?.Request.Host}"
+            $"{accessor.HttpContext?.Request.Scheme}://{accessor.HttpContext?.Request.Host}"
         );
         try
         {
-            var localFiles = Directory.GetFiles($"{_configuration["PhotoPath"]}/{DateTime.UtcNow:yyyy}/{type}/fb");
+            var localFiles = Directory.GetFiles($"{configuration["PhotoPath"]}/{DateTime.UtcNow:yyyy}/{type}/fb");
             var files = localFiles.Select(x => $"{hostUrl}photos/{DateTime.UtcNow:yyyy}/{type}/fb/{Path.GetFileName(x)}");
             return Ok(files);
         }
         catch (DirectoryNotFoundException)
         {
-            _logger.LogWarning(
+            logger.LogWarning(
                 "Client tried to download files from non-existing type \"{Type}\"!",
                 type
             );
@@ -133,7 +124,7 @@ public class PhotoController : ControllerBase
         }
         catch (Exception e)
         {
-            _logger.LogError(e, "Failed getting photos");
+            logger.LogError(e, "Failed getting photos");
             return BadRequest(e);
         }
     }
