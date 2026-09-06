@@ -1,0 +1,23 @@
+# Per-developer overrides and secrets. Never committed.
+docker-compose.override.yml
+
+# Environment files. .env.example is committed; .env never is.
+.env
+.env.*
+!.env.example
+
+# Go build output. The dev loop builds to /tmp inside the container, but a stray
+# host build should not be committed either.
+/go/www/
+*.test
+*.out
+
+# The blob store, if anyone ever points BLOB_PATH at the working tree. These are
+# photographs of identifiable minors; they do not belong in git under any
+# circumstances.
+/blobs/
+/photos/
+
+# Editor / OS noise
+.DS_Store
+*.swp
