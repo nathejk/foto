@@ -1,0 +1,21 @@
+go 1.25.0
+
+// Dev-only workspace. Per go-bff-layout, shared-go resolves from the sibling
+// ../../shared-go checkout so edits there are picked up live without a
+// commit/push/version-bump cycle. CI and production build with GOWORK=off and
+// resolve the version pinned in go.mod instead, so a change that only builds
+// with this workspace active is a broken build — the dev loop's pinned_build
+// gate exists to catch exactly that.
+//
+// This matters more here than in most repos: foto is the first service to mount
+// a shared-go `tables` entity, and the patrulje lookup it needs
+// (querier.GetByNumber) does not exist upstream yet. The moment somebody adds it
+// in ../../shared-go everything compiles here and nothing compiles in CI, until
+// shared-go is pushed and the pin bumped.
+//
+// cqrs and stream are deliberately NOT in the workspace: they resolve from the
+// module proxy at the pinned version in every environment.
+use (
+	.
+	../../shared-go
+)
