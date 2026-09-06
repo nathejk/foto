@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Metadata.Profiles.Iptc;
 using SixLabors.ImageSharp.Processing;
@@ -11,9 +13,12 @@ namespace FotoApp.Controllers;
 public class PhotoController(
     IConfiguration configuration,
     IHttpContextAccessor accessor,
+    IHttpClientFactory httpClientFactory,
     ILogger<PhotoController> logger)
-    : ControllerBase            
+    : ControllerBase
 {
+    /// Guards appends to the failed-notification log against concurrent uploads.
+    private static readonly SemaphoreSlim FailedLogLock = new(1, 1);
     [HttpPost]
     public async Task<IActionResult> Upload(
         [FromQuery] string teamNumber,
@@ -93,6 +98,8 @@ public class PhotoController(
                 $"{accessor.HttpContext?.Request.Scheme}://{accessor.HttpContext?.Request.Host}/photos/{DateTime.UtcNow:yyyy}/{type}/{fileName}"
             );
 
+            await NotifyWebhook(teamNumber, type, attention, hostUrl);
+
             return new OkObjectResult(new { ImageUrl = hostUrl });
         }
         catch (Exception ex)
@@ -101,6 +108,92 @@ public class PhotoController(
             return StatusCode(500, $"Internal server error: {ex}");
         }
     }
+
+    /// Advertises a newly stored photo to the configured webhook. Never throws: the photo is
+    /// already safely on disk, so a failing receiver must not fail the upload. Failures are
+    /// appended as JSON lines to {PhotoPath}/webhook-failed.jsonl so they can be replayed later
+    /// without any metadata loss.
+    private async Task NotifyWebhook(string teamNumber, string type, bool attention, Uri imageUrl)
+    {
+        var webhookUrl = configuration.GetValue<string>("WebhookUrl");
+        if (string.IsNullOrWhiteSpace(webhookUrl))
+        {
+            return;
+        }
+
+        var payload = new PhotoNotification(
+            teamNumber,
+            type,
+            attention,
+            imageUrl.ToString(),
+            DateTimeOffset.UtcNow
+        );
+
+        try
+        {
+            var client = httpClientFactory.CreateClient();
+
+            var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl)
+            {
+                Content = JsonContent.Create(payload),
+            };
+
+            var secret = configuration.GetValue<string>("WebhookSecret");
+            if (!string.IsNullOrWhiteSpace(secret))
+            {
+                request.Headers.Add("X-Webhook-Secret", secret);
+            }
+
+            var response = await client.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            logger.LogInformation("Advertised {ImageUrl} to webhook", imageUrl);
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Failed advertising {ImageUrl} to webhook", imageUrl);
+            await LogFailedNotification(payload, e);
+        }
+    }
+
+    private async Task LogFailedNotification(PhotoNotification payload, Exception cause)
+    {
+        var path = $"{configuration.GetValue<string>("PhotoPath")!.TrimEnd('/')}/webhook-failed.jsonl";
+
+        await FailedLogLock.WaitAsync();
+        try
+        {
+            var line = JsonSerializer.Serialize(
+                new
+                {
+                    payload.TeamNumber,
+                    payload.Type,
+                    payload.Attention,
+                    payload.ImageUrl,
+                    payload.CreatedAt,
+                    FailedAt = DateTimeOffset.UtcNow,
+                    Error = cause.Message,
+                }
+            );
+
+            await System.IO.File.AppendAllTextAsync(path, line + Environment.NewLine);
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e, "Failed writing webhook retry log to {Path}", path);
+        }
+        finally
+        {
+            FailedLogLock.Release();
+        }
+    }
+
+    private record PhotoNotification(
+        string TeamNumber,
+        string Type,
+        bool Attention,
+        string ImageUrl,
+        DateTimeOffset CreatedAt
+    );
 
     [HttpGet("list/{type}")]
     public IActionResult List([FromRoute] string type)
