@@ -3,7 +3,8 @@
 **Status:** draft
 **Author:** agent session (Zed / Claude Opus 5)
 **Created:** 2026-09-07
-**Last updated:** 2026-09-07
+**Last updated:** 2026-09-07 (decisions: pull-only ingest, verbatim originals, no
+Vue, shared-go patrulje projection, several photos per team, visible rejections)
 **Approved:**
 **Shipped:**
 **Target users:** organizer (photo crew at start/finish), and every downstream nathejk service that wants to show a team photo
@@ -128,11 +129,57 @@ not (§6).
 7. A consumer receives the event and renders `GET /photos/<thumbRef>` from
    `foto`.
 
+### Rejections are meant to be visible
+
+Only spejder patruljer are photographed, but test shots with invented team numbers
+do arrive. Decided 2026-09-07: those must not look like success, and must not look
+like a transient error either.
+
+The enabling insight is that **`kamera` keeps its own copy**. We have decided not to
+touch that repo, so it retains the file *and* appends the payload of any failed
+webhook to `webhook-failed.jsonl`. Refusing is therefore not data loss — that file
+**is** the retry queue. Two consequences:
+
+1. A refusal is safe, so a photo we cannot attribute is refused rather than stored.
+   Accumulating unattributable photographs of children, with no owning team and no
+   retention anchor, is the outcome worth avoiding.
+2. **There is no "pending photos" table in this service.** An earlier draft parked
+   such photos and retried them; once `kamera` holds the bytes and logs the payload,
+   that table is a second, worse copy of a queue that already exists. If a refused
+   number turns out to be a real team that had not been projected yet, replaying that
+   jsonl line then succeeds.
+
+Every refusal is visible through four channels, because nobody should have to join
+two logs to understand one failure: the **status**, a stable machine-readable **`code`**
+in the body, an **`X-Foto-Rejected` header** (so a bare 422 among 200s is not anonymous
+in Traefik's access log), and a **WARN log line** carrying the team number and the URL.
+
+| Situation | Status | `code` | Retryable |
+|---|---|---|---|
+| Stored and published | `200` | `photographed` | — |
+| Unknown team number — **the test-photo case** | `422` | `unknown_team_number` | no |
+| Two teams share the number (should be impossible) | `409` | `ambiguous_team_number` | no |
+| Missing/wrong `X-Webhook-Secret` | `401` | — | no |
+| Unreadable body, or empty `imageUrl` | `400` | `bad_payload` | no |
+| `imageUrl` unfetchable, wrong host, or `404` upstream | `400` | `bad_image_url` | no |
+| Fetched bytes are not a decodable image | `400` | `not_an_image` | no |
+| Photo larger than the cap | `413` | `too_large` | no |
+| Upstream unreachable or `5xx` | `502` | `fetch_failed` | yes |
+| Database or broker unavailable | `503` | `not_ready` | yes |
+| Bytes stored but publish failed | `500` | `publish_failed` | yes |
+
+`422` rather than `404` for the unknown team: the request is well-formed and the
+endpoint exists, so a `404` would suggest the webhook URL was wrong and send somebody
+looking in the wrong place. `422` says "understood, cannot process this".
+
+Resolution happens **before** the fetch, so a test shot costs one indexed query rather
+than a download and three blob writes.
+
 ### Edge cases and error scenarios
 
 | Scenario | Behaviour |
 |---|---|
-| `teamNumber` does not resolve to a `teamID` | **Store the bytes, do not publish, answer `2xx`.** The photo is parked as `pending` and retried as patrulje events arrive. The bytes are safe, so re-delivery would add nothing; failing the callback would make `kamera` retry something no retry can fix. A photo is never dropped because the domain has not caught up, and publishing under a fabricated teamID would put an unerasable row in the log. |
+| `teamNumber` does not resolve to a `teamID` | **Refuse it, loudly: `422` with code `unknown_team_number`.** Nothing is fetched and nothing is stored. Decided 2026-09-07 — see "Rejections are meant to be visible". |
 | The same webhook is delivered twice | Same bytes → same hash → `blob.Put` is a no-op, same event body, projection converges. Idempotent by content addressing, not by a dedupe table. |
 | `foto` is down when `kamera` fires | `kamera` appends to `webhook-failed.jsonl` (existing behaviour). Replaying those lines later is safe, per the row above. |
 | Bytes cannot be acquired (404/timeout) | `5xx` the callback so the failure lands in `kamera`'s retry log rather than being silently swallowed. Nothing is published. |
@@ -161,9 +208,16 @@ not (§6).
       discard, and the archive is the canonical copy of the photograph). The
       EXIF orientation is *also* recorded on the event, so a consumer need not
       parse the file to know which way up it goes.
+- [ ] A photograph that cannot be attributed to a patrulje is **refused with a
+      distinct, visible response** — `422` / `unknown_team_number`, plus the
+      `X-Foto-Rejected` header and a WARN log line. Nothing is fetched and nothing
+      is stored for it. Every other failure mode has its own status and code; see the
+      table in §5.
+- [ ] **Several photographs per `(year, teamNumber)`** are supported: each is its own
+      event and its own row, keyed by content hash.
 - [ ] A display rendition and a downscale cache are derived at ingest. Initial
-      set: `thumb256`, `thumb1024`, `photo2000` (names derived from the longest
-      edge). Each is its own content-addressed object with its own recorded
+      set: display `2000`, plus `thumb1024` and `thumb256` (names derived from the
+      longest edge). Each is its own content-addressed object with its own recorded
       `contentType`, `bytes`, `width`, `height`.
 - [ ] `NATHEJK.<year>.patrulje.<teamID>.photographed` is published per photo,
       carrying **references, never bytes**.
@@ -354,13 +408,36 @@ All annotated for OpenAPI — this is a hard repo rule, including for
 
 ### Data / storage
 
-- **Blob store** on a mounted volume, `<root>/<aa>/<bb>/<sha256>`, sharded to
-  keep directories small. Write-once, never mutated. **The only state that
-  cannot be rebuilt from the stream, so the only thing needing backup.**
+- **Blob store** on a mounted volume, `<root>/<aa>/<sha256>` — one level of fan-out
+  on the first two hex characters, so 256 buckets, which is ample at this scale and
+  keeps a directory listing manageable. Write-once, never mutated, `0700` directories
+  and `0600` files. **The only state that cannot be rebuilt from the stream, so the
+  only thing needing backup.**
 - **MariaDB** holds projections only, both rebuildable:
-  - `photo` — one row per `photographed` event, renditions as JSON in a column
-    (small set, always read with its photo, written by one event; a side table
-    would add a join and a delete-on-replace path for no read this app makes).
+  - `photo` — one row per photograph, **primary key `(year, teamId, type, ref)`**.
+
+    A team has many photographs, so the key cannot be `(year, teamId)` the way a
+    person's single portrait can be (confirmed 2026-09-07: several photos per
+    `(year, teamNumber)` are expected). Identity is the **content hash of the display
+    image**, which is what makes a replay converge: the same photograph re-delivered
+    hashes to the same ref and rewrites one row, while a genuinely different
+    photograph of the same team gets its own. `type` is in the key so the same bytes
+    filed as both `start` and `finish` stay two facts rather than one overwriting the
+    other.
+
+    One consequence to know about: re-ingesting the same source photo after the JPEG
+    encoder changes would produce a different display ref and therefore a second row.
+    `originalRef` and `sourceUrl` make that diagnosable.
+
+    Renditions are stored as JSON in a column — the set is small, always read with its
+    photo, and written by one event, so a side table would add a join and a
+    delete-on-replace path for no read this service makes.
+
+    **Several photographs share one NATS subject, which was checked rather than
+    assumed:** the `NATHEJK` stream has `max_msgs_per_subject = -1`, `limits`
+    retention, no `max_age` and no `max_msgs`, so every message on a subject is
+    retained. A stream configured to keep only the last message per subject would
+    silently discard all but the most recent photograph of each team.
   - `patrulje` — **`shared-go/tables/patrulje`, mounted as-is.** `foto` calls
     `patrulje.New(publisher, writer, reader)` and registers the returned value
     on the mux; the projection then maintains `teamId`, `year` and `teamNumber`
@@ -387,9 +464,9 @@ All annotated for OpenAPI — this is a hard repo rule, including for
      bumped, `foto` satisfies its own `TeamResolver` port with a small adapter
      in `cmd/api` that queries the projection through `cqrs.Reader`. The
      adapter is the temporary half; the port stays either way.
-- **Pending photos** — bytes stored, team unresolved. A row, not a queue: it
-  must survive a restart and be visible to a human asking "why has team 42 no
-  photo".
+- **No pending-photos table.** Deliberately removed from this design — `kamera`'s
+  `webhook-failed.jsonl` already is that queue. See "Rejections are meant to be
+  visible" in §5.
 
 ### Dependencies & risks
 
@@ -432,29 +509,32 @@ step is testable on its own. `kamera` is untouched until the last phase.
 - [ ] Task: `internal/blob` content-addressed store — `Put`/`Get`/`Ref.Valid`,
       sharded layout, idempotent writes, tests
 
-**Phase 2 — the domain contract**
-- [ ] Task: mount the `shared-go/tables/patrulje` projection and resolve
-      `(year, teamNumber)` → `teamID` behind a `TeamResolver` port
+**Phase 2 — the domain contract** — *done, task 002*
+- [x] Task: mount the `shared-go/tables/patrulje` projection and resolve
+      `(year, teamNumber)` → `teamID` behind a resolver port (task 001)
 - [ ] Task: contribute `GetByNumber` to `shared-go/tables/patrulje/querier.go`,
       bump the pin, and delegate the local adapter to it
-- [ ] Task: `nathejk/table/photo` messages + subject builders + token
-      validation, with the shared-go import constraint enforced
-- [ ] Task: `photo` projection — schema, `photographed`/`photopurged` handlers,
-      replay idempotence tests via `cqrstest`
+- [x] Task: `nathejk/table/photo` messages + subject builders + token
+      validation, with the shared-go import constraint enforced (task 002)
+- [x] Task: `photo` projection — schema keyed by content hash,
+      `photographed`/`photopurged` handlers, replay idempotence tests (task 002)
 
-**Phase 3 — the pipeline**
-- [ ] Task: `internal/imaging` — decode, rendition set, EXIF orientation read,
+**Phase 3 — the pipeline** — *done, task 003*
+- [x] Task: `internal/imaging` — decode, rendition set, EXIF orientation read,
       bounded dimensions. No strip step: originals are stored verbatim
-- [ ] Task: ingest service — store the original untouched, derive renditions,
-      resolve the team, publish; pending-photo handling when the team is unknown
+- [x] Task: `internal/blob` content-addressed store
+- [x] Task: `internal/fetcher` allowlisted, size-capped, timeout-bounded pull
+- [x] Task: ingest — store the original untouched, derive renditions, resolve the
+      team, publish
 
-**Phase 4 — ingest and delivery**
-- [ ] Task: `POST /callback/kamera` — payload binding, secret auth, allowlisted
-      + size-capped + timeout-bounded fetch of `imageUrl`, responding only
-      after the event is published
-- [ ] Task: `GET /photos/{ref}[/{name}]` + `GET /api/patruljer/{teamId}/photos`,
-      serving renditions only and never the original
-- [ ] Task: pending-photo retry — republish as patrulje events resolve
+**Phase 4 — ingest and delivery** — *done, task 003*
+- [x] Task: `POST /callback/kamera` — payload binding, secret auth, allowlisted
+      fetch, responding only after the event is published, and the rejection
+      taxonomy
+- [x] Task: `GET /photos/{ref}` + `GET /api/patruljer/{teamId}/photos`, serving
+      renditions only and never the original
+- [ ] Task: `GET /photos/{ref}/{name}` — fetch a rendition by name rather than by
+      hash, for a client that has a photo's identity but not its rendition refs
 
 **Phase 5 — cutover**
 - [ ] Task: rendition backfill command — regenerate the set from stored originals
@@ -471,31 +551,33 @@ No feature flag: nothing consumes the event until phase 5, so the switch is
    2026-09-07: `foto` pulls.** `kamera` is not modified, keeps its volume, and
    `foto` fetches `imageUrl` during the callback. No `POST /api/photos`.
 2. ~~**`teamNumber` → `teamID`.**~~ **Decided 2026-09-07:** mount
-   `shared-go/tables/patrulje` and resolve against it; no new projection. Two
-   sub-questions remain open and are genuinely unanswered:
-   - **Is `(year, teamNumber)` unique?** Nothing in `shared-go` enforces it —
-     `idx_patrulje_year_number` is a plain `KEY`, not `UNIQUE`, and
-     `AssignNumber` computes the next number from `GetLastWithNumber` with no
-     constraint behind it. If two rows can share a number in a year, the
-     resolver must decide (fail loudly, or prefer one) rather than silently
-     picking whichever row sorts first. **Needs an answer before ingest goes
-     live.**
-   - **Which number space is `kamera`'s `teamNumber` in?** `patrulje` is one
-     entity among `klan`, `senior` and `spejder`. If a klan can be photographed
-     at start and carries a number from the same sequence, the subject
-     `…patrulje.<teamID>.photographed` is wrong for it (see Q3).
-3. **What is `type`, really?** `start` and `finish` come from a query parameter.
-   Are all types patrulje photos? If a `type` ever means a crew member or a
-   location, the subject `…patrulje.<teamID>.photographed` is wrong for it and
-   needs a sibling.
-4. **Is `photographed` the right verb, given the subject already has `year`?**
-   Confirm `NATHEJK.<year>.patrulje.<teamID>.photographed` against whatever
-   `NATHEJK.<year>.patrulje.*` subjects `shared-go` already publishes, so this
-   does not collide with or contradict an existing pattern.
-5. **The rendition set.** `thumb256` / `thumb1024` / `photo2000` is a guess
-   informed by `kamera`'s existing 2000px `fb/` copy. What do the actual
-   consumers need? Wrong guesses are cheap to fix (backfill) but only if the
-   original is kept.
+   `shared-go/tables/patrulje` and resolve against it; no new projection.
+   `(year, teamNumber)` **is unique** — confirmed. Two notes rather than open
+   questions now:
+   - Uniqueness is a convention, not a constraint: `idx_patrulje_year_number` is a
+     plain `KEY`, not `UNIQUE`, and `AssignNumber` allocates from
+     `GetLastWithNumber` with nothing enforcing it. The resolver therefore still
+     fails loudly (`409` / `ambiguous_team_number`) if it ever sees two rows, because
+     the alternative is attributing a child's photograph to whichever row sorted
+     first, invisibly. Making the index `UNIQUE` in shared-go would turn that from a
+     runtime check into an impossibility — worth a task.
+   - **Only spejder patruljer are photographed** — confirmed. Numbers from another
+     entity's space (klan, senior) therefore resolve to nothing and are refused as
+     `unknown_team_number`, which is the correct outcome and needs no extra handling.
+3. **What is `type`, really?** `start` and `finish` come from a query parameter, and
+   it is carried through as free text. Since only spejder patruljer are photographed
+   (Q2), the subject is right for every `type` we expect — but if a `type` ever means
+   a crew member or a location, it needs a sibling subject rather than this one.
+4. ~~**Is `photographed` the right verb?**~~ **Settled 2026-09-07 by inspection:**
+   `shared-go`'s patrulje projector consumes
+   `NATHEJK.*.patrulje.*.{signedup,updated,numberassigned,started}`, so
+   `….photographed` joins an established vocabulary and collides with nothing. Purge
+   uses `photopurged` rather than `purged`, so it cannot read as the team itself
+   having been erased.
+5. ~~**The rendition set.**~~ **Decided 2026-09-07:** display 2000px (matching what
+   `kamera` already produced, so nothing downstream loses a size it had), plus
+   `thumb1024` and `thumb256`. Still cheap to revise — the original is kept, so a new
+   size can be backfilled.
 6. **Retention.** hej's portraits have a policy ("the portrait does not outlive
    the event"). Do patrulje photos? `PatruljePhotoPurged` is reserved either
    way, but if there is a policy it should be a task now rather than a PRD later.
