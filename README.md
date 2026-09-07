@@ -11,6 +11,47 @@ fetch the bytes from here.
 See **PRD 001** (`roadmap/prd/`) for the design and the decisions behind it, and
 `roadmap/tasks/` for execution state.
 
+## How a photo gets in
+
+`kamera` POSTs a webhook when a photo is taken. That payload carries a **URL, not the
+bytes**, so `foto` fetches the image back from `kamera` — a deliberate consequence of
+not modifying that repo.
+
+```
+POST /callback/kamera        X-Webhook-Secret: …
+  ↓  resolve teamNumber → teamID   (shared-go patrulje projection)
+  ↓  fetch imageUrl                (allowlisted host, size-capped, bounded)
+  ↓  decode                        (the bytes decide the type, not the header)
+  ↓  store original verbatim + display + renditions
+  ↓  publish NATHEJK.<year>.patrulje.<teamID>.photographed
+200
+```
+
+The response comes **last, on purpose**. `kamera` is the only other copy of the
+photograph, and on a non-2xx it appends the payload to its own
+`webhook-failed.jsonl` — which is, in effect, the retry queue. An early `200` throws
+that away.
+
+A team can be photographed many times; each photograph is its own event and its own
+row, identified by the content hash of its display image.
+
+### Rejections are meant to stand out
+
+Only spejder patruljer are photographed, but test shots with invented team numbers do
+arrive. Those get their own status, a stable `code`, an `X-Foto-Rejected` header (so
+they are visible in an access log without joining ours) and a WARN line:
+
+```console
+$ curl -i -X POST .../callback/kamera -d '{"teamNumber":"9999",…}'
+HTTP/1.1 422 Unprocessable Entity
+X-Foto-Rejected: unknown_team_number
+
+{"code":"unknown_team_number","retryable":false,"teamNumber":"9999",…}
+```
+
+Nothing is fetched and nothing is stored for a photo that cannot be attributed to a
+team. The full table of statuses and codes is in PRD 001 §5.
+
 ## What must be backed up
 
 **The blob store, and nothing else.**
@@ -62,12 +103,24 @@ go/
 │   ├── main.go           # startup order and the readiness rule
 │   ├── eventing.go       # the cqrs seam: Publisher / Writer / Reader
 │   ├── patrulje.go       # mounts shared-go's patrulje projection
+│   ├── callback.go       # kamera's webhook + the rejection taxonomy
+│   ├── ingest.go         # storing an upload's four objects
+│   ├── photos.go         # serving bytes; never an original
 │   ├── env.go database.go routes.go healthcheck.go
 │   └── app/              # transport helpers (embed app.JsonApi)
-└── internal/
-    ├── teamnumber/       # kamera's teamNumber → domain teamID
-    └── vcs/              # build-time version stamping
+├── internal/
+│   ├── blob/             # content-addressed object store
+│   ├── fetcher/          # deliberately paranoid HTTP pull of imageUrl
+│   ├── imaging/          # decode, renditions, EXIF orientation
+│   ├── teamnumber/       # kamera's teamNumber → domain teamID
+│   └── vcs/              # build-time version stamping
+└── nathejk/table/photo/  # the event, its subjects, and its projection
 ```
+
+`nathejk/table/photo/` is written to be lifted into `shared-go` unchanged: it may not
+import `internal/...` (Go forbids importing another module's internal tree, so such an
+import would block the move) and depends on nothing but `jrgensen/cqrs` and the
+standard library.
 
 There is **no `vue/` workspace**: `foto` is headless by decision (PRD 001 §7).
 Do not scaffold the standard Nathejk SPA here without a PRD change.
@@ -92,6 +145,14 @@ in `docker-compose.override.yml`, which is gitignored.
 | `EVENT_YEAR` | The **season**, not the calendar year — see below |
 | `BLOB_PATH` | Where photo objects live |
 | `WEBHOOK_SECRET` | Shared secret `kamera` sends as `X-Webhook-Secret` |
+| `PHOTO_HOSTS` | Comma-separated hosts an `imageUrl` may be fetched from |
+| `MAX_PHOTO_BYTES` | Cap on a fetched image (default 32 MiB) |
+| `FETCH_TIMEOUT` | Timeout for fetching an `imageUrl` (default 20s) |
+
+`PHOTO_HOSTS` is a security control, not a convenience. The webhook carries a URL
+and this service fetches it, so without an allowlist the ingest endpoint is an SSRF
+proxy. It **fails closed**: an empty list refuses every photo, and that is warned
+about at boot.
 
 `EVENT_YEAR` is not derivable from the clock. `shared-go`'s patrulje projection
 takes `year` from the event *subject* — the season a team signed up for — which

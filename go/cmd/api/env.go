@@ -9,6 +9,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -39,9 +40,23 @@ type config struct {
 	// must be backed up.
 	blobPath string
 
-	// webhookSecret is the shared secret kamera sends as X-Webhook-Secret.
+	// webhookSecret is the shared secret the camera app sends as X-Webhook-Secret.
 	// Empty disables the check, which is only ever right in dev.
 	webhookSecret string
+
+	// photoHosts is the allowlist of hosts an imageUrl may point at.
+	//
+	// The webhook carries a URL and this service fetches it, so without this the
+	// ingest endpoint is an SSRF proxy for anyone who knows the secret. It fails
+	// closed: an empty list refuses every photograph.
+	photoHosts []string
+
+	// maxPhotoBytes caps a fetched image.
+	maxPhotoBytes int64
+
+	// fetchTimeout bounds the fetch. It sits inside the callback the camera app is
+	// waiting on, so it must stay well under that client's own timeout.
+	fetchTimeout time.Duration
 }
 
 func loadConfig() config {
@@ -61,8 +76,32 @@ func loadConfig() config {
 	flag.StringVar(&cfg.blobPath, "blob-path", envStr("BLOB_PATH", ""), "Directory for photo objects (empty keeps them in memory)")
 	flag.StringVar(&cfg.webhookSecret, "webhook-secret", envStr("WEBHOOK_SECRET", ""), "Shared secret kamera sends as X-Webhook-Secret (empty disables the check)")
 
+	photoHosts := envStr("PHOTO_HOSTS", "")
+	flag.Func("photo-hosts", "Comma-separated hosts an imageUrl may be fetched from (empty refuses all)", func(v string) error {
+		photoHosts = v
+		return nil
+	})
+	flag.Int64Var(&cfg.maxPhotoBytes, "max-photo-bytes", int64(envInt("MAX_PHOTO_BYTES", 32<<20)), "Maximum size of a fetched photo in bytes")
+	flag.DurationVar(&cfg.fetchTimeout, "fetch-timeout", envDuration("FETCH_TIMEOUT", 20*time.Second), "Timeout for fetching a photo from imageUrl")
+
 	flag.Parse()
+
+	cfg.photoHosts = splitHosts(photoHosts)
 	return cfg
+}
+
+// splitHosts parses the comma-separated allowlist.
+//
+// Empty entries are dropped rather than kept as "": a trailing comma is a typo, and
+// an empty host in the allowlist could otherwise match something unexpected.
+func splitHosts(v string) []string {
+	var out []string
+	for _, host := range strings.Split(v, ",") {
+		if host = strings.TrimSpace(host); host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
 }
 
 // currentYear is the fallback for EVENT_YEAR. It is a fallback, not a default

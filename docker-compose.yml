@@ -33,6 +33,12 @@ services:
       # Shared secret kamera sends as X-Webhook-Secret. Empty disables the check —
       # OVERRIDE in docker-compose.override.yml.
       WEBHOOK_SECRET: ""
+      # Hosts an imageUrl may be fetched from. The webhook carries a URL and this
+      # service fetches it, so without an allowlist the ingest endpoint is an SSRF
+      # proxy. It fails closed: empty refuses every photo.
+      PHOTO_HOSTS: "foto.nathejk.dk,kamera.local.nathejk.dk"
+      MAX_PHOTO_BYTES: "33554432"
+      FETCH_TIMEOUT: "20s"
       # GO_BUILD_FLAGS: "-race"   # uncomment for the race detector
     volumes:
       - ./go:/app
