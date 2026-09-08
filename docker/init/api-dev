@@ -1,0 +1,125 @@
+#!/bin/sh
+# Dev entrypoint for the `api` container: hot-reload loop for the Go BFF.
+#
+# On every *.go / *.sql change it re-runs the gates (test, vet, staticcheck,
+# build, pinned-build) and restarts the binary. gosec + govulncheck run once at
+# startup, report-only, so their findings and network fetch don't gate the loop.
+#
+# It builds to a fixed path and execs that binary rather than using `go run`:
+# `go run` compiles to a temp binary and execs it as a child, so $! is the
+# wrapper, not the server. Killing the wrapper leaves the server holding the
+# port, the loop reports a restart, the new process cannot bind, and requests
+# keep hitting the *old* binary — an edit appears to reload while the new code
+# never runs.
+set -eu
+
+export GOCACHE="${GOCACHE:-/go/.cache/go-build}"
+
+API_BIN=/tmp/api-dev-server
+
+# The port the server binds, as it appears in /proc/net/*. Must match cmd/api's
+# default (PORT=4000). Uppercase hex, no leading "0x" — the kernel's format.
+API_PORT="${PORT:-4000}"
+API_PORT_HEX=$(printf '%04X' "$API_PORT")
+
+echo "==> one-time security scans (report-only)"
+go tool gosec -quiet ./... || true
+go tool govulncheck ./... || true
+
+API_PID=""
+
+# port_held reports whether anything is listening on API_PORT.
+#
+# Reads /proc/net directly because this image has no ss, netstat, lsof or fuser.
+# tcp6 is the one that matters: Go's net.Listen("tcp", ":4000") binds a dual-stack
+# IPv6 socket, so the listener appears in /proc/net/tcp6 and NOT in /proc/net/tcp.
+# Checking only the latter looks clean while the port is held.
+#
+# State 0A is TCP_LISTEN.
+port_held() {
+    awk -v want=":$API_PORT_HEX" '
+        $4 == "0A" && index($2, want) == length($2) - length(want) + 1 { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+# pinned_build compiles the way CI and production do: GOWORK=off, so shared-go
+# resolves from the version pinned in go.mod rather than from the /shared-go mount.
+#
+# This gate matters more in foto than elsewhere. go.work makes edits in the sibling
+# checkout live — which is the point — and also means code using a symbol that
+# exists only there compiles perfectly here and fails the moment CI resolves the
+# pinned module. foto is the first service to mount a shared-go `tables` entity and
+# needs a querier method (patrulje GetByNumber) that does not exist upstream yet, so
+# this is the exact mistake waiting to be made.
+#
+# Build-only, not test: the point is to catch a missing symbol, and running the
+# suite twice per save would make the loop unusable. Non-fatal when the module
+# cannot be fetched — an offline machine must still get a working loop.
+pinned_build() {
+    echo "==> pinned build (GOWORK=off, as CI resolves it)"
+    if GOWORK=off go build ./... 2>/tmp/pinned-build.err; then
+        return 0
+    fi
+    if grep -qiE 'dial tcp|no such host|timeout|connection refused|proxy|verifying' /tmp/pinned-build.err; then
+        echo "==> WARN: could not verify the pinned build (network); skipping"
+        sed 's/^/    /' /tmp/pinned-build.err
+        return 0
+    fi
+    echo "==> ERROR: builds with the workspace but NOT with the version pinned in go.mod."
+    echo "==>        Something here uses a shared-go symbol that only exists in ../shared-go."
+    echo "==>        Push shared-go, then bump: go get github.com/nathejk/shared-go@latest"
+    sed 's/^/    /' /tmp/pinned-build.err
+    return 1
+}
+
+stop() {
+    if [ -n "$API_PID" ]; then
+        kill "$API_PID" 2>/dev/null || true
+        wait "$API_PID" 2>/dev/null || true
+        API_PID=""
+    fi
+
+    # Safety net, not the mechanism: catches an orphan from a crash.
+    if port_held; then
+        pkill -f "$API_BIN" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 20 ] && port_held; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+    fi
+}
+
+start() {
+    # Refuse to start on a held port rather than starting a process that cannot
+    # bind and letting the previous one keep answering.
+    if port_held; then
+        echo "==> ERROR: port $API_PORT is still held; refusing to start a second server"
+        return
+    fi
+
+    echo "==> gates: get / test / vet / staticcheck / build / pinned-build"
+    # shellcheck disable=SC2086
+    if go get -v ./... \
+        && go test -timeout 10s ./... \
+        && go vet ./... \
+        && go tool staticcheck ./... \
+        && go build ./... \
+        && pinned_build \
+        && go build ${GO_BUILD_FLAGS:-} -o "$API_BIN" foto.nathejk.dk/cmd/api; then
+        echo "==> starting api"
+        "$API_BIN" &
+        API_PID=$!
+    else
+        echo "==> build failed; waiting for changes"
+    fi
+}
+
+trap 'stop; exit 0' INT TERM
+
+start
+while inotifywait -qq -r -e modify,create,delete,move --include '.*\.(go|sql)$' /app; do
+    stop
+    start
+done

@@ -1,0 +1,133 @@
+name: foto
+
+# Dev stack for the Nathejk foto service — the entrypoint for photographs into
+# the ecosystem (PRD 001).
+#
+# No `ui` service: foto is headless by decision (PRD 001 §7). The `api` container
+# is browser-reachable because kamera POSTs its webhook to it from outside the
+# compose network, which is what makes this different from other repos where the
+# Go binary stays internal.
+#
+# Full `up` requires the org infra repo's external `traefik` and `jetstream`
+# networks. Real secrets and per-developer overrides go in
+# docker-compose.override.yml (gitignored) — never in this file.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: base
+    environment:
+      PORT: "4000"
+      ENV: development
+      GOCACHE: /go/.cache/go-build
+      DB_DSN: "foto:foto@tcp(db:3306)/foto?parseTime=true&multiStatements=true"
+      JETSTREAM_DSN: "nats://jetstream:4222"
+      BLOB_PATH: "/blobs"
+      # The season, not the calendar year: shared-go's patrulje projection takes
+      # `year` from the event subject, which stops matching the calendar year once
+      # a season opens in the preceding one. Resolving a team number against the
+      # wrong year finds nothing.
+      EVENT_YEAR: "2026"
+      # Shared secret kamera sends as X-Webhook-Secret. Empty disables the check —
+      # OVERRIDE in docker-compose.override.yml.
+      WEBHOOK_SECRET: ""
+      # Hosts an imageUrl may be fetched from. The webhook carries a URL and this
+      # service fetches it, so without an allowlist the ingest endpoint is an SSRF
+      # proxy. It fails closed: empty refuses every photo.
+      #
+      # Every host kamera might serve photos from has to be here, or a perfectly
+      # good URL is refused with host_not_allowed — the effective list is logged at
+      # boot so it can be checked at a glance.
+      PHOTO_HOSTS: "kamera.nathejk.dk,foto.nathejk.dk,kamera.local.nathejk.dk,foto.local.nathejk.dk"
+      MAX_PHOTO_BYTES: "33554432"
+      FETCH_TIMEOUT: "20s"
+      # GO_BUILD_FLAGS: "-race"   # uncomment for the race detector
+    volumes:
+      - ./go:/app
+      - api:/go
+      # Sibling shared-go checkout, resolved via go/go.work so edits are picked up
+      # live. Prod/CI build with GOWORK=off against the pin in go.mod.
+      - ../shared-go:/shared-go
+      # The blob store. This is the only state that cannot be rebuilt by replaying
+      # the stream, which makes it the whole backup scope — and the one volume
+      # `docker compose down -v` must not be run against casually.
+      - blobs:/blobs
+    networks:
+      - local
+      - traefik
+      - jetstream
+    depends_on:
+      - db
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      # Required: the container listens on 4000, not Traefik's default 80.
+      traefik.http.services.foto.loadbalancer.server.port: "4000"
+
+      # Serve BOTH http and https (org rules pattern 3), rather than redirecting
+      # http to https.
+      #
+      # The redirect pattern is wrong for this service, and quietly so. Traefik's
+      # redirectscheme answers 302, and an HTTP client following a 302 on a POST
+      # converts it to a GET and drops the body — .NET's HttpClient, which is what
+      # kamera uses, does exactly that. The webhook would then arrive as a bodyless
+      # GET, hit this router's method check, and be refused as 405: a photo lost to a
+      # redirect nobody would think to suspect.
+      #
+      # Two routers pointing at one service. Both name the service explicitly,
+      # because Traefik cannot infer it when a service has more than one router.
+      traefik.http.routers.foto.rule: Host(`foto.local.nathejk.dk`)
+      traefik.http.routers.foto.entrypoints: web
+      traefik.http.routers.foto.service: foto
+      # A router with any tls setting is HTTPS-only, so the cert resolver must sit on
+      # the websecure router alone. Putting it on the single router is what makes
+      # plain http requests match nothing and collect Traefik's own text/plain 404 —
+      # which looks like foto is down, when foto never saw the request.
+      traefik.http.routers.foto-secure.rule: Host(`foto.local.nathejk.dk`)
+      traefik.http.routers.foto-secure.entrypoints: websecure
+      traefik.http.routers.foto-secure.tls.certresolver: desec
+      traefik.http.routers.foto-secure.service: foto
+  db:
+    image: mariadb:10.8
+    environment:
+      MARIADB_ROOT_PASSWORD: secret
+      MARIADB_DATABASE: foto
+      MARIADB_USER: foto
+      MARIADB_PASSWORD: foto
+    volumes:
+      - db:/var/lib/mysql
+    networks:
+      - local
+    labels:
+      # This Traefik has exposedByDefault=true, so internal-only services must
+      # opt out explicitly.
+      traefik.enable: "false"
+
+  phpmyadmin:
+    image: phpmyadmin
+    environment:
+      PMA_HOST: db
+    networks:
+      - local
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      traefik.http.routers.foto-sql.rule: Host(`sql.foto.local.nathejk.dk`)
+    depends_on:
+      - db
+
+networks:
+  local:
+  # External networks are owned by the org infra repo — never redefined here.
+  traefik:
+    external: true
+  jetstream:
+    external: true
+
+volumes:
+  api:
+  db:
+  blobs:
