@@ -95,6 +95,57 @@ docker compose run --rm --entrypoint go api tool staticcheck ./...
 
 Requires the org infra repo's external `traefik` and `jetstream` networks.
 
+## Troubleshooting
+
+**A `404` with `Content-Type: text/plain` and the body `404 page not found`.**
+That is **Traefik**, not `foto` — every response this service produces is JSON. It means
+no Traefik router matched, so the request never reached the container. Usual causes: the
+`api` container is not running, or a router has TLS configured and you used `http://`.
+A router with *any* `tls` setting is HTTPS-only, which is why the compose file declares
+two routers (`foto` on `web`, `foto-secure` on `websecure`) instead of putting the cert
+resolver on a single one.
+
+Do not "fix" that by adding the `redirect-to-https` middleware. Traefik's
+`redirectscheme` answers `302`, and an HTTP client following a `302` on a POST turns it
+into a bodyless GET — .NET's `HttpClient`, which `kamera` uses, does exactly that. The
+webhook would arrive as a GET, be refused `405`, and the photo would be lost to a
+redirect nobody would think to suspect.
+
+**`400 host_not_allowed`, but the URL works in `curl`.** The URL is fine; `PHOTO_HOSTS`
+does not list its host. The response names the host and the setting, and the effective
+allowlist is logged at boot (`"photo hosts allowlisted"`). Note it matches **hostnames,
+not ports**, so allowlisting a host permits any port on it.
+
+**`422 unknown_team_number`.** No patrulje holds that number in `EVENT_YEAR` — almost
+always a test shot, or the wrong season. Nothing is fetched or stored.
+
+**`500 publish_failed` on a fresh broker.** The `NATHEJK` stream must already exist.
+`jrgensen/stream` v0.1.2 logs `"Stream created 'NATHEJK'"` but its creation code is
+commented out, so on an empty JetStream nothing is created and publishing fails with
+`no response from stream`. Create it once:
+
+```sh
+nats stream add NATHEJK --subjects 'NATHEJK.>' --storage file --retention limits \
+  --max-msgs=-1 --max-msgs-per-subject=-1 --max-bytes=-1 --max-age=0
+```
+
+The bytes are stored before the event is published, so a failure here is recoverable:
+nothing is acknowledged, and `kamera` keeps the photo and logs the payload.
+
+## Removing test photos
+
+Per-team subjects exist so one team's photographic history can be erased and nothing
+else:
+
+```sh
+nats stream purge NATHEJK --subject 'NATHEJK.2026.patrulje.<teamId>.photographed'
+```
+
+The `photo` table is a projection and rebuilds from the stream, so purging the subject
+and restarting is enough to remove the rows. The blob objects are *not* removed by
+that — they are the one thing not derived from the log — and are left for the retention
+job.
+
 ## Layout
 
 ```

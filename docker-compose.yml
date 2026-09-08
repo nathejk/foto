@@ -63,13 +63,32 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik
-      # Plain HTTP: the only client is kamera's server-side webhook and internal
-      # services, so there is no browser secure context to satisfy. Add the
-      # redirect pattern if a UI ever consumes this directly.
-      traefik.http.routers.foto.rule: Host(`foto.local.nathejk.dk`)
       # Required: the container listens on 4000, not Traefik's default 80.
       traefik.http.services.foto.loadbalancer.server.port: "4000"
 
+      # Serve BOTH http and https (org rules pattern 3), rather than redirecting
+      # http to https.
+      #
+      # The redirect pattern is wrong for this service, and quietly so. Traefik's
+      # redirectscheme answers 302, and an HTTP client following a 302 on a POST
+      # converts it to a GET and drops the body — .NET's HttpClient, which is what
+      # kamera uses, does exactly that. The webhook would then arrive as a bodyless
+      # GET, hit this router's method check, and be refused as 405: a photo lost to a
+      # redirect nobody would think to suspect.
+      #
+      # Two routers pointing at one service. Both name the service explicitly,
+      # because Traefik cannot infer it when a service has more than one router.
+      traefik.http.routers.foto.rule: Host(`foto.local.nathejk.dk`)
+      traefik.http.routers.foto.entrypoints: web
+      traefik.http.routers.foto.service: foto
+      # A router with any tls setting is HTTPS-only, so the cert resolver must sit on
+      # the websecure router alone. Putting it on the single router is what makes
+      # plain http requests match nothing and collect Traefik's own text/plain 404 —
+      # which looks like foto is down, when foto never saw the request.
+      traefik.http.routers.foto-secure.rule: Host(`foto.local.nathejk.dk`)
+      traefik.http.routers.foto-secure.entrypoints: websecure
+      traefik.http.routers.foto-secure.tls.certresolver: desec
+      traefik.http.routers.foto-secure.service: foto
   db:
     image: mariadb:10.8
     environment:
