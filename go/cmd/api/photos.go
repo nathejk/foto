@@ -29,6 +29,11 @@ import (
 
 // showPhotoHandler serves one object's bytes.
 //
+// Registered for both GET and HEAD. net/http suppresses a response body for HEAD on
+// its own, but this handler returns before reading the object rather than relying on
+// that: streaming several megabytes off disk only to have them discarded is a
+// pointless cost on a route a cache may probe often.
+//
 // @Summary      Serve photo bytes
 // @Description  Serves a stored rendition by its content hash. Only display images and their renditions are servable; stored originals are refused with 404 because they retain the upload's metadata. The URL is a content hash, so the response is immutable and cached aggressively.
 // @Tags         photos
@@ -88,6 +93,15 @@ func (app *application) showPhotoHandler(w http.ResponseWriter, r *http.Request)
 	// something executable.
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	if r.Method == http.MethodHead {
+		// Headers only. Deliberately no Content-Length: the store's seam is an
+		// io.ReadCloser with no size on it, and the projection's recorded byte count
+		// describes the object at ingest — close enough to be tempting, and wrong the
+		// moment they disagree. Omitting it is honest; announcing a length the GET
+		// might not match would break a cache in a way nobody would trace back here.
+		return
+	}
 
 	if _, err := io.Copy(w, reader); err != nil {
 		// Too late for a status code — the header is already written — so this is

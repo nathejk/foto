@@ -34,6 +34,10 @@ func (app *application) routes() http.Handler {
 	router.HandlerFunc(http.MethodPost, "/callback/kamera", app.kameraCallbackHandler)
 
 	router.HandlerFunc(http.MethodGet, "/photos/:ref", app.showPhotoHandler)
+	// HEAD as well as GET. httprouter does not derive one from the other, and this
+	// route serves images to browsers and sits behind a caching proxy — both of which
+	// legitimately probe with HEAD, and both of which would otherwise get a 405.
+	router.HandlerFunc(http.MethodHead, "/photos/:ref", app.showPhotoHandler)
 
 	return router
 }
