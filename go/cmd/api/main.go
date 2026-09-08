@@ -117,6 +117,12 @@ func run(logger *slog.Logger) error {
 		// every ingest will be refused, which is worth saying loudly at boot rather
 		// than discovering per photograph.
 		logger.Warn("PHOTO_HOSTS is empty: every imageUrl will be refused")
+	} else {
+		// Logged at INFO because the allowlist is the single most likely thing to be
+		// wrong about an ingest that "should work": the URL is fetchable by hand and
+		// refused here. Having the effective list in the boot log makes that a glance
+		// rather than an investigation.
+		logger.Info("photo hosts allowlisted", "hosts", cfg.photoHosts)
 	}
 	if cfg.webhookSecret == "" {
 		logger.Warn("WEBHOOK_SECRET is empty: the camera app's callback is unauthenticated")

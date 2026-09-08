@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	bff "foto.nathejk.dk/cmd/api/app"
@@ -65,6 +66,15 @@ type rejection struct {
 	// decides nothing about the status code — it is what the log line says, so an
 	// operator knows whether replaying the entry is worth their time.
 	retryable bool
+	// fix names the thing to change when the cause is our configuration rather than
+	// the request. Empty for rejections the caller can act on themselves.
+	//
+	// This field exists because of a real confusion its absence caused: a host missing
+	// from the allowlist reported "imageUrl is not a fetchable address", which reads as
+	// "your URL is broken" when the URL was perfectly good — fetchable with curl from
+	// the same machine — and the allowlist was simply short. A rejection caused by our
+	// own configuration has to say so.
+	fix string
 }
 
 func (r rejection) Error() string { return fmt.Sprintf("%s: %s", r.code, r.message) }
@@ -107,7 +117,24 @@ var (
 	}
 	errBadImageURL = rejection{
 		status: http.StatusBadRequest, code: "bad_image_url",
-		message: "imageUrl is not a fetchable address on an allowed host", retryable: false,
+		message: "imageUrl is not a usable http(s) URL", retryable: false,
+	}
+	// errHostNotAllowed is our configuration, not the caller's mistake, and used to be
+	// indistinguishable from a broken URL. It gets its own code, names the host, and
+	// names the setting to change.
+	errHostNotAllowed = rejection{
+		status: http.StatusBadRequest, code: "host_not_allowed",
+		message:   "imageUrl's host is not in this service's allowlist, so it was refused without being fetched",
+		retryable: false,
+		fix:       "add the host to PHOTO_HOSTS and restart foto",
+	}
+	// errUpstreamNotFound is the genuine "that file is not there" case — a different
+	// problem from both of the above, and worth not confusing with them: the path is in
+	// kamera's payload but not on kamera's disk.
+	errUpstreamNotFound = rejection{
+		status: http.StatusBadRequest, code: "upstream_not_found",
+		message:   "imageUrl returned 404 — the host is reachable but has no file at that path",
+		retryable: false,
 	}
 	errNotAnImage = rejection{
 		status: http.StatusBadRequest, code: "not_an_image",
@@ -298,22 +325,27 @@ func (app *application) ingest(ctx context.Context, payload kameraPayload) (inge
 
 // fetchRejection maps a fetch failure onto the taxonomy.
 //
-// The distinction that matters is whose fault it is: a URL we refuse to fetch is
-// the payload's problem and will never work, whereas an upstream that timed out or
-// returned a 5xx is worth retrying. A 404 upstream is treated as permanent — the
-// file is not there and will not appear.
+// Three outcomes that were once one, and the distinction is the whole point:
+//
+//	host_not_allowed    our config — the URL is fine, we refused to fetch it
+//	upstream_not_found  their disk — the host answered, the file is not there
+//	fetch_failed        their server — unreachable or erroring, so retryable
+//
+// Collapsing these into one "bad_image_url" is what makes somebody curl the URL
+// successfully and conclude the service is broken.
 func fetchRejection(err error) *rejection {
 	switch {
+	case errors.Is(err, fetcher.ErrHostNotAllowed):
+		return &errHostNotAllowed
 	case errors.Is(err, fetcher.ErrInvalidURL),
-		errors.Is(err, fetcher.ErrSchemeNotAllowed),
-		errors.Is(err, fetcher.ErrHostNotAllowed):
+		errors.Is(err, fetcher.ErrSchemeNotAllowed):
 		return &errBadImageURL
 	case errors.Is(err, fetcher.ErrTooLarge):
 		return &errTooLarge
 	case errors.Is(err, fetcher.ErrUnexpectedStatus):
 		var status *fetcher.StatusError
 		if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
-			return &errBadImageURL
+			return &errUpstreamNotFound
 		}
 		return &errFetchFailed
 	default:
@@ -343,6 +375,12 @@ func (app *application) rejectIngest(w http.ResponseWriter, r *http.Request, pay
 		"ip", clientIP(r),
 		"err", cause,
 	)
+	if rej.fix != "" {
+		// Repeated on its own line rather than buried in the body above, because this
+		// is the line somebody will be reading when they want to know what to change.
+		app.Logger.Warn("rejection is a configuration problem",
+			"code", rej.code, "fix", rej.fix, "allowedHosts", app.config.photoHosts)
+	}
 
 	// A dedicated header so the refusal shows up in Traefik's access log without
 	// anybody joining it to ours.
@@ -353,6 +391,17 @@ func (app *application) rejectIngest(w http.ResponseWriter, r *http.Request, pay
 		"code":       rej.code,
 		"retryable":  rej.retryable,
 		"teamNumber": payload.TeamNumber,
+	}
+	if rej.fix != "" {
+		body["fix"] = rej.fix
+	}
+	// The offending host, echoed back for the one rejection where knowing it is the
+	// whole fix. It is the host the caller sent, so this discloses nothing new — unlike
+	// returning the allowlist itself, which is why that is logged at boot instead.
+	if rej.code == errHostNotAllowed.code {
+		if u, err := url.Parse(payload.ImageURL); err == nil && u.Hostname() != "" {
+			body["host"] = u.Hostname()
+		}
 	}
 	if err := app.WriteJSON(w, rej.status, body, nil); err != nil {
 		app.ServerErrorResponse(w, r, err)

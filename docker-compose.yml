@@ -36,7 +36,11 @@ services:
       # Hosts an imageUrl may be fetched from. The webhook carries a URL and this
       # service fetches it, so without an allowlist the ingest endpoint is an SSRF
       # proxy. It fails closed: empty refuses every photo.
-      PHOTO_HOSTS: "foto.nathejk.dk,kamera.local.nathejk.dk"
+      #
+      # Every host kamera might serve photos from has to be here, or a perfectly
+      # good URL is refused with host_not_allowed — the effective list is logged at
+      # boot so it can be checked at a glance.
+      PHOTO_HOSTS: "kamera.nathejk.dk,foto.nathejk.dk,kamera.local.nathejk.dk,foto.local.nathejk.dk"
       MAX_PHOTO_BYTES: "33554432"
       FETCH_TIMEOUT: "20s"
       # GO_BUILD_FLAGS: "-race"   # uncomment for the race detector

@@ -365,7 +365,7 @@ func TestCallbackRejectionTaxonomy(t *testing.T) {
 	}{
 		{"undecodable bytes", "/notanimage.jpg", http.StatusBadRequest, "not_an_image", false},
 		{"upstream 500", "/boom.jpg", http.StatusBadGateway, "fetch_failed", true},
-		{"upstream 404", "/missing.jpg", http.StatusBadRequest, "bad_image_url", false},
+		{"upstream 404", "/missing.jpg", http.StatusBadRequest, "upstream_not_found", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -392,17 +392,95 @@ func TestCallbackRejectionTaxonomy(t *testing.T) {
 
 // A URL on a host we do not serve photos from is refused before any request is made.
 // The webhook body is attacker-influenceable, so this is the SSRF boundary.
+//
+// It must also be *distinguishable from a broken URL*. Reporting the config problem as
+// "imageUrl is not a fetchable address" is what makes somebody curl the URL
+// successfully and conclude the service is broken, so the code, the offending host and
+// the fix are all asserted here.
 func TestCallbackRefusesForeignHost(t *testing.T) {
 	h := newHarness(t)
 	h.expectTeamLookup("2026", "42", "team-abc")
 
-	rec := h.post(t, testSecret, h.payload("42", "http://169.254.169.254/latest/meta-data/"))
+	rec := h.post(t, testSecret, h.payload("42", "https://kamera.example.com/photos/start/Team-2_1.jpg"))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400: %s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("X-Foto-Rejected"); got != "bad_image_url" {
-		t.Errorf("X-Foto-Rejected = %q, want bad_image_url", got)
+	if got := rec.Header().Get("X-Foto-Rejected"); got != "host_not_allowed" {
+		t.Errorf("X-Foto-Rejected = %q, want host_not_allowed", got)
+	}
+	body := decodeBody(t, rec)
+	if body["code"] != "host_not_allowed" {
+		t.Errorf("code = %v, want host_not_allowed", body["code"])
+	}
+	// The host, so the reader knows which one to allowlist.
+	if body["host"] != "kamera.example.com" {
+		t.Errorf("host = %v, want kamera.example.com", body["host"])
+	}
+	// And the setting to change, so this is not a guessing game.
+	if fix, _ := body["fix"].(string); !strings.Contains(fix, "PHOTO_HOSTS") {
+		t.Errorf("fix = %q, want it to name PHOTO_HOSTS", fix)
+	}
+}
+
+// A host not on the allowlist must be refused without a request leaving the process:
+// that is what makes this an SSRF boundary rather than a filter on the response.
+//
+// The allowlist is narrowed here rather than pointing at a second server, because
+// httptest always binds 127.0.0.1 — so a "foreign" test server is the *same host* on a
+// different port, and the allowlist matches hostnames, not ports. (That is itself worth
+// knowing: allowlisting a host permits any port on it.)
+func TestCallbackForeignHostIsNotFetched(t *testing.T) {
+	h := newHarness(t)
+	h.expectTeamLookup("2026", "42", "team-abc")
+
+	var hits int
+	h.upstream.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write(jpegBytes(t, 100, 100))
+	})
+
+	// An allowlist that does not cover the upstream, while still pointing the client
+	// at it: if the check were performed anywhere but before the request, the server
+	// would be hit.
+	narrowed, err := fetcher.New([]string{"kamera.nathejk.dk"}, 32<<20, 5*time.Second)
+	if err != nil {
+		t.Fatalf("fetcher.New: %v", err)
+	}
+	narrowed.Client = h.upstream.Client()
+	h.app.photos = narrowed
+
+	rec := h.post(t, testSecret, h.payload("42", h.imageURL))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Foto-Rejected"); got != "host_not_allowed" {
+		t.Errorf("X-Foto-Rejected = %q, want host_not_allowed", got)
+	}
+	if hits != 0 {
+		t.Errorf("the upstream was contacted %d times; a disallowed host must be refused before any request", hits)
+	}
+}
+
+// A malformed URL is a different problem from a disallowed host and keeps the old code.
+func TestCallbackRejectsUnusableURL(t *testing.T) {
+	for _, bad := range []string{
+		"file:///etc/passwd",
+		"gopher://example.com/",
+		"not a url at all",
+	} {
+		h := newHarness(t)
+		h.expectTeamLookup("2026", "42", "team-abc")
+
+		rec := h.post(t, testSecret, h.payload("42", bad))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: got %d, want 400", bad, rec.Code)
+			continue
+		}
+		if got := rec.Header().Get("X-Foto-Rejected"); got != "bad_image_url" && got != "host_not_allowed" {
+			t.Errorf("%q: X-Foto-Rejected = %q", bad, got)
+		}
 	}
 }
 
